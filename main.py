@@ -1,19 +1,29 @@
 import numpy as np
 from sklearn.linear_model import LogisticRegression, LinearRegression
+import matplotlib.pyplot as plt
 
-N = 5000
-G = 10
-T = 20
+N = 5000 #number of samples
+G = 10 #number of intervals
+T = 20 #the total survival time for division
 
+#random censor given the survival time of an individual, follows an flipped exponential distribution
+def explen(T):
+    bet = 5
+    a = np.random.exponential(scale=bet)
+    if a < 2 * bet:
+        return T - a * T / (2 * bet)
+    else:
+        return explen(T)
 
+#sigmoid function, gives the probability of censoring for a sample
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
-
+#root mean square error
 def rmsve(v_standard, r_ref):
-    return np.sqrt(np.mean(np.power(v_standard - r_ref, 2)))
+    return np.sqrt(np.mean(np.power((v_standard - r_ref), 2)))
 
-
+#cut the survival time of one individual to G intervals
 def cutLen(t, T, G):
     y = np.zeros(G)
     delt = T / G
@@ -26,7 +36,7 @@ def cutLen(t, T, G):
             y[j] = t - j * delt
     return y
 
-
+#cut the original uncensored N-samples dataset to a N*G array of G intervals
 def cutOriST(ST, T, G):
     N = len(ST)
     Tau = np.zeros((N, G))
@@ -34,7 +44,7 @@ def cutOriST(ST, T, G):
         Tau[i] = cutLen(ST[i], T, G)
     return Tau
 
-
+#generate the dataset of X and survival time
 def generateData(N):
     X = np.zeros((N, 2))
     X0 = np.random.uniform(0, 5, N)
@@ -45,7 +55,7 @@ def generateData(N):
     ST = X0 + 2 * X1 + X2
     return X, ST
 
-
+#do random censoring to the original dataset, flag=1 if we decide to censor this patient
 def censorData(X, ST):
     ST_ = ST.copy()
     flag = np.zeros(len(X))
@@ -58,13 +68,14 @@ def censorData(X, ST):
         flag[i] = f
         if f == 1:
             l = np.random.uniform(0, ST[i])
+            l = explen(ST[i])
             ST_[i] = l
         else:
             nonCenData.append(ST[i])
     # print(np.mean(nonCenData))
     return ST_, flag
 
-
+#analyse the censored data, generate M_ij for each individual i at each interval j
 def doST(ST, flag, G, T):
     Tau = np.zeros((N, G))
     M = np.zeros((N, G))
@@ -89,7 +100,7 @@ def doST(ST, flag, G, T):
         M[i] = m
     return Tau, M
 
-
+#doubly robust estimator
 class DRest():
     def __init__(self, X, Tr, Tau):
         indexs = np.where(Tr == 1)
@@ -110,7 +121,7 @@ class DRest():
                 # res[i] = y[i]
         return res
 
-
+#direct method estimator, here we use linear regression
 class DMest():
     def __init__(self, X, Tr, Y):
         indexs = np.where(Tr == 1)
@@ -120,7 +131,7 @@ class DMest():
     def pre(self, x):
         return self.est.predict(x)
 
-
+#IPW estimator
 class IPWest():
     def __init__(self, X, Tr):
         self.est = LogisticRegression()
@@ -135,7 +146,7 @@ class IPWest():
         total = total / len(tr)
         return total
 
-
+#DM estimator for G intervals, returning rmsve
 def MeanDM(X, M, Tau_cen, Tau):
     meanPredict = np.zeros(G)
     Tau_pre = np.zeros((N, G))
@@ -147,7 +158,7 @@ def MeanDM(X, M, Tau_cen, Tau):
         meanPredict[j] = rmsve(np.sum(Tau[:, j:], 1), np.sum(Tau_pre[:, j:], 1))
     return meanPredict
 
-
+#IPW estimator for G intervals, returning rmsve
 def MeanIPW(X, M, Tau_cen):
     meanPredict = np.zeros(G)
     for j in range(G):
@@ -157,7 +168,7 @@ def MeanIPW(X, M, Tau_cen):
         meanPredict[j] = np.mean(Y_)
     return meanPredict
 
-
+#DR estimator for G intervals, returning rmsve
 def MeanDR(X, M, Tau_cen, Tau):
     meanPredict = np.zeros(G)
     Tau_pre = np.zeros((N, G))
@@ -170,9 +181,9 @@ def MeanDR(X, M, Tau_cen, Tau):
     for j in range(G):
         meanPredict[j] = np.sum(meanPredict[j:])
         ve[j] = rmsve(np.sum(Tau[:, j:], 1), np.sum(Tau_pre[:, j:], 1))
-    return meanPredict, ve
+    return ve
 
-
+#another DR estimator for G intervals, returning rmsve of DM and DR, details can be seen in appendix
 def MeanDR_(X, M, Tau_cen, Tau):
     drMean = np.zeros(G)
     ve_DM = np.zeros(G)
@@ -200,18 +211,22 @@ def MeanDR_(X, M, Tau_cen, Tau):
 
                     # pre_dr[i] += rho * (np.sum(Tau_cen[i, j:]) - y[i])
         Q[:, j] = pre_dr
-        y_pre=y
+        y_pre = y
         ve_DR[j] = rmsve(np.sum(Tau[:, j:], 1), pre_dr)
         drMean[j] = np.mean(pre_dr)
-    return drMean, ve_DM, ve_DR
+    return ve_DM, ve_DR
 
 
 def generateCensoredData(N):
+    numCen = np.zeros(G)
     X, ST = generateData(N)
+    Tau = cutOriST(ST, T, G)
+    # ST+=np.random.normal(0,1,size=N)
     ST_cen, flag = censorData(X, ST)
     Tau_cen, M = doST(ST_cen, flag, G, T)
-    Tau = cutOriST(ST, T, G)
-    return X, M, Tau_cen, Tau
+    for j in range(G):
+        numCen[j] = N - np.sum(M[:, j])
+    return X, M, Tau_cen, Tau, numCen
 
 
 def changeform(arr):
@@ -221,29 +236,49 @@ def changeform(arr):
     return a
 
 
-# j=5
-# X,ST=generateData(N)
-# Tau=cutOriST(ST,T,G)
-# ST_cen,flag=censorData(X,ST)
-# Tau_cen,M=doST(ST_cen,flag,G,T)
-# es=DMest(X,M[:,j],Tau_cen[:,j])
-# y_=es.pre(X)
-# print(ST[:10])
-# print(M[:10,j])
-# print(Tau[:10,j])
-# print(y_[:10])
-# print(np.mean(y_    ),np.mean(Tau[:,j]))
+def plotBar(ve_DR, ve_DM, Num_cen):
+    barWidth = 0.25
+    br = np.arange(G)
+    xlabels = [(i + 1).__str__() for i in range(G)]
+    fig, ax1 = plt.subplots()
+    ax1.bar(br, ve_DR, color='r', width=barWidth, label='DR')
+    ax1.bar(br + barWidth, ve_DM, color='g', width=barWidth, label='DM')
+    ax1.set_ylabel('rmsve', fontweight='bold', fontsize=10)
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Num_censor',fontweight='bold', fontsize=10)
+    ax2.plot(br, Num_cen)
+
+    plt.xlabel('intervals', fontweight='bold', fontsize=15)
+    plt.xticks([r for r in range(G)], xlabels)
+    ax1.legend()
+    # ax1.ylim(0,1.5)
+    plt.savefig("squares.pdf")
+    plt.show()
+
+if __name__=="__main__":
+    # j=5
+    # X,ST=generateData(N)
+    # Tau=cutOriST(ST,T,G)
+    # ST_cen,flag=censorData(X,ST)
+    # Tau_cen,M=doST(ST_cen,flag,G,T)
+    # es=DMest(X,M[:,j],Tau_cen[:,j])
+    # y_=es.pre(X)
+    # print(ST[:10])
+    # print(M[:10,j])
+    # print(Tau[:10,j])
+    # print(y_[:10])
+    # print(np.mean(y_    ),np.mean(Tau[:,j]))
 
 
-X, M, Tau_cen, Tau = generateCensoredData(N)
-mean = np.load('mean.npy')
-mean_ = np.load('mean_.npy')
-# print(mean_)
-# # print(mean)
-# print(changeform(MeanDM(X,M,Tau_cen)))
-# print(changeform(MeanIPW(X,M,Tau_cen)))
-# print(changeform(MeanDR(X,M,Tau_cen)))
-print(MeanDM(X, M, Tau_cen, Tau))
-print(MeanDR(X, M, Tau_cen, Tau)[1])
-print(MeanDR_(X, M, Tau_cen, Tau)[1])
-print(MeanDR_(X, M, Tau_cen, Tau)[2])
+    X, M, Tau_cen, Tau, numC = generateCensoredData(N)
+    mean = np.load('mean.npy')
+    mean_ = np.load('mean_.npy')
+    ve_DM = MeanDM(X, M, Tau_cen, Tau)
+    ve_DR = MeanDR(X, M, Tau_cen, Tau)
+
+    plotBar(ve_DR, ve_DM, numC)
+
+    # print(MeanDM(X, M, Tau_cen, Tau))
+    # print(MeanDR(X, M, Tau_cen, Tau))
+    # print(numC)
